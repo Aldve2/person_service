@@ -1,4 +1,5 @@
 name: Deploy to ECS
+
 on:
   push:
     branches: [main]
@@ -11,7 +12,6 @@ env:
   CONTAINER_NAME: person-service
   DOCKER_IMAGE: aledve/person-service
   DOCKER_TAG: latest
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -33,12 +33,12 @@ jobs:
       - name: Verify AWS credentials
         id: verify-aws
         run: |
-          echo "Verificando credenciales AWS..."
+          echo "Verifying AWS credentials..."
           if ! aws sts get-caller-identity; then
-            echo "::error::Error: Credenciales AWS inválidas o expiradas"
+            echo "::error::Invalid or expired AWS credentials"
             exit 1
           fi
-          echo "✓ Credenciales válidas"
+          echo "✓ AWS credentials valid"
 
       - name: Login to Docker Hub
         if: steps.verify-aws.outcome == 'success'
@@ -49,53 +49,76 @@ jobs:
 
       - name: Build and push Docker image
         if: steps.verify-aws.outcome == 'success'
+        id: docker-build
         run: |
           docker build -t ${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }} .
           docker push ${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}
           echo "IMAGE_NAME=${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}" >> $GITHUB_ENV
 
-      - name: Update ECS service
+      - name: Get current task definition
         if: steps.verify-aws.outcome == 'success'
+        id: get-task-def
         run: |
-          # Obtener task definition actual
-          TASK_DEFINITION=$(aws ecs describe-task-definition \
+          echo "Getting current task definition..."
+          aws ecs describe-task-definition \
             --task-definition ${{ env.ECS_TASK_DEFINITION }} \
-            --query 'taskDefinition')
-          
-          # Actualizar solo la imagen del contenedor
-          UPDATED_DEFINITION=$(echo "$TASK_DEFINITION" | jq \
-            --arg IMAGE "${{ env.IMAGE_NAME }}" \
-            --arg NAME "${{ env.CONTAINER_NAME }}" \
-            '.containerDefinitions |= map(if .name == $NAME then .image = $IMAGE else . end)')
-          
-          # Registrar nueva versión
+            --query 'taskDefinition' > task-definition.json
+          echo "✓ Task definition retrieved"
+
+      - name: Update task definition
+        if: steps.verify-aws.outcome == 'success'
+        id: update-task-def
+        run: |
+          echo "Updating container image in task definition..."
+          jq --arg IMAGE "${{ env.IMAGE_NAME }}" \
+             --arg NAME "${{ env.CONTAINER_NAME }}" \
+             'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy) |
+             .containerDefinitions |= map(if .name == $NAME then .image = $IMAGE else . end) |
+             if .executionRoleArn == null then del(.executionRoleArn) else . end' \
+             task-definition.json > updated-task-definition.json
+          echo "✓ Task definition updated"
+
+      - name: Register new task definition
+        if: steps.verify-aws.outcome == 'success'
+        id: register-task-def
+        run: |
+          echo "Registering new task definition..."
           NEW_TASK_ARN=$(aws ecs register-task-definition \
-            --cli-input-json "$(echo "$UPDATED_DEFINITION" | jq '{
-              family: .family,
-              networkMode: .networkMode,
-              requiresCompatibilities: .requiresCompatibilities,
-              cpu: .cpu,
-              memory: .memory,
-              executionRoleArn: .executionRoleArn,
-              containerDefinitions: .containerDefinitions
-            }')" \
+            --cli-input-json file://updated-task-definition.json \
             --query 'taskDefinition.taskDefinitionArn' \
             --output text)
-          
-          # Actualizar servicio
+          echo "NEW_TASK_ARN=$NEW_TASK_ARN" >> $GITHUB_ENV
+          echo "✓ New task definition registered: $NEW_TASK_ARN"
+
+      - name: Update ECS service
+        if: steps.verify-aws.outcome == 'success'
+        id: update-service
+        run: |
+          echo "Updating ECS service..."
           aws ecs update-service \
             --cluster ${{ env.ECS_CLUSTER }} \
             --service ${{ env.ECS_SERVICE }} \
-            --task-definition "$NEW_TASK_ARN" \
+            --task-definition ${{ env.NEW_TASK_ARN }} \
             --force-new-deployment
-          
-          echo "✓ Servicio actualizado"
+          echo "✓ Service update initiated"
 
-      - name: Wait for service stabilization
+      - name: Wait for deployment
         if: steps.verify-aws.outcome == 'success'
+        id: wait-for-deployment
         run: |
-          echo "Esperando a que el servicio se estabilice..."
+          echo "Waiting for service to stabilize..."
           aws ecs wait services-stable \
             --cluster ${{ env.ECS_CLUSTER }} \
             --services ${{ env.ECS_SERVICE }}
-          echo "✓ Despliegue completado con éxito"
+          echo "✓ Deployment completed successfully"
+
+      - name: Verify deployment
+        if: steps.verify-aws.outcome == 'success'
+        run: |
+          echo "Verifying deployment..."
+          SERVICE_STATUS=$(aws ecs describe-services \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }} \
+            --query 'services[0].events[0].message' \
+            --output text)
+          echo "Latest service event: $SERVICE_STATUS"
