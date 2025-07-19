@@ -1,20 +1,21 @@
 name: Deploy to ECS
-
 on:
   push:
     branches: [main]
 
 env:
   AWS_REGION: us-east-1
-  AWS_ECS_CLUSTER: person-cluster
-  AWS_ECS_SERVICE: person-service
-  AWS_ECS_TASK_DEFINITION_FAMILY: person-task
+  ECS_CLUSTER: person-cluster
+  ECS_SERVICE: person-service
+  ECS_TASK_DEFINITION: person-task
   CONTAINER_NAME: person-service
-  DOCKER_IMAGE: aledve/person-service:latest
+  DOCKER_IMAGE: aledve/person-service
+  DOCKER_TAG: latest
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout code
@@ -27,41 +28,74 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
 
-      - name: Download current task definition
-        id: task-def
+      - name: Verify AWS credentials
+        id: verify-aws
         run: |
-          aws ecs describe-task-definition --task-definition $AWS_ECS_TASK_DEFINITION_FAMILY > task-def.json
-          cat task-def.json
+          echo "Verificando credenciales AWS..."
+          if ! aws sts get-caller-identity; then
+            echo "::error::Error: Credenciales AWS inválidas o expiradas"
+            exit 1
+          fi
+          echo "✓ Credenciales válidas"
 
-      - name: Create new task definition
-        id: new-task-def
+      - name: Login to Docker Hub
+        if: steps.verify-aws.outcome == 'success'
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: Build and push Docker image
+        if: steps.verify-aws.outcome == 'success'
         run: |
-          jq '.taskDefinition | {
+          docker build -t ${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }} .
+          docker push ${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}
+          echo "IMAGE_NAME=${{ env.DOCKER_IMAGE }}:${{ env.DOCKER_TAG }}" >> $GITHUB_ENV
+
+      - name: Update ECS service
+        if: steps.verify-aws.outcome == 'success'
+        run: |
+          # Obtener task definition actual
+          TASK_DEFINITION=$(aws ecs describe-task-definition \
+            --task-definition ${{ env.ECS_TASK_DEFINITION }} \
+            --query 'taskDefinition')
+          
+          # Actualizar solo la imagen del contenedor
+          UPDATED_DEFINITION=$(echo "$TASK_DEFINITION" | jq \
+            --arg IMAGE "${{ env.IMAGE_NAME }}" \
+            --arg NAME "${{ env.CONTAINER_NAME }}" \
+            '.containerDefinitions |= map(if .name == $NAME then .image = $IMAGE else . end)')
+          
+          # Registrar nueva versión
+          NEW_TASK_ARN=$(aws ecs register-task-definition \
+            --cli-input-json "$(echo "$UPDATED_DEFINITION" | jq '{
               family: .family,
               networkMode: .networkMode,
               requiresCompatibilities: .requiresCompatibilities,
               cpu: .cpu,
               memory: .memory,
               executionRoleArn: .executionRoleArn,
-              containerDefinitions: [.containerDefinitions[] | 
-                if .name == env.CONTAINER_NAME then
-                  .image = env.DOCKER_IMAGE | .
-                else
-                  .
-                end
-              ]
-          }' task-def.json > new-task-def.json
-
-      - name: Register new task definition
-        id: register-task
-        run: |
-          new_task_def_arn=$(aws ecs register-task-definition --cli-input-json file://new-task-def.json | jq -r '.taskDefinition.taskDefinitionArn')
-          echo "TASK_DEF_ARN=$new_task_def_arn" >> $GITHUB_ENV
-
-      - name: Update ECS service to use new task definition
-        run: |
+              containerDefinitions: .containerDefinitions
+            }')" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          
+          # Actualizar servicio
           aws ecs update-service \
-            --cluster $AWS_ECS_CLUSTER \
-            --service $AWS_ECS_SERVICE \
-            --task-definition $TASK_DEF_ARN
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_SERVICE }} \
+            --task-definition "$NEW_TASK_ARN" \
+            --force-new-deployment
+          
+          echo "✓ Servicio actualizado"
+
+      - name: Wait for service stabilization
+        if: steps.verify-aws.outcome == 'success'
+        run: |
+          echo "Esperando a que el servicio se estabilice..."
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_SERVICE }}
+          echo "✓ Despliegue completado con éxito"
