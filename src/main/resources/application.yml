@@ -2,10 +2,10 @@ spring:
   application:
     name: person-service
   neo4j:
-    uri: bolt://${NEO4J_IP}:7687
+    uri: ${NEO4J_URI}
     authentication:
-      username: neo4j
-      password: 6154277353
+      username: ${NEO4J_USERNAME}
+      password: ${NEO4J_PASSWORD}
 server:
   address: '0.0.0.0'
   port: 10011
