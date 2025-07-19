@@ -1,4 +1,4 @@
-name: Deploy to ECS
+name: Deploy to ECS with Neo4j Configuration
 
 on:
   push:
@@ -12,6 +12,7 @@ env:
   CONTAINER_NAME: person-service
   DOCKER_IMAGE: aledve/person-service
   DOCKER_TAG: latest
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -65,18 +66,31 @@ jobs:
             --query 'taskDefinition' > task-definition.json
           echo "✓ Task definition retrieved"
 
-      - name: Update task definition
+      - name: Update task definition with Neo4j configuration
         if: steps.verify-aws.outcome == 'success'
         id: update-task-def
         run: |
-          echo "Updating container image in task definition..."
+          echo "Updating task definition with Neo4j configuration..."
           jq --arg IMAGE "${{ env.IMAGE_NAME }}" \
              --arg NAME "${{ env.CONTAINER_NAME }}" \
+             --arg NEO4J_IP "${{ secrets.NEO4J_IP }}" \
+             --arg NEO4J_USERNAME "${{ secrets.NEO4J_USERNAME }}" \
+             --arg NEO4J_PASSWORD "${{ secrets.NEO4J_PASSWORD }}" \
              'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy) |
-             .containerDefinitions |= map(if .name == $NAME then .image = $IMAGE else . end) |
+             .containerDefinitions |= map(
+               if .name == $NAME then 
+                 .image = $IMAGE |
+                 .environment += [
+                   {
+                     "name": "NEO4J_IP",
+                     "value": $NEO4J_IP
+                   }
+                 ]
+               else . end
+             ) |
              if .executionRoleArn == null then del(.executionRoleArn) else . end' \
              task-definition.json > updated-task-definition.json
-          echo "✓ Task definition updated"
+          echo "✓ Task definition updated with Neo4j configuration"
 
       - name: Register new task definition
         if: steps.verify-aws.outcome == 'success'
