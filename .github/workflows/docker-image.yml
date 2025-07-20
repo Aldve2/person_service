@@ -6,7 +6,7 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  ECS_CLUSTER: person-cluster
+  ECS_CLUSTER: crm-cluster
   ECS_SERVICE: person-service
   ECS_TASK_DEFINITION: person-task
   CONTAINER_NAME: person-service
