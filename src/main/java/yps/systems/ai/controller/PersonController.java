@@ -42,6 +42,7 @@ public class PersonController {
         return new ResponseEntity<>(savedPerson.getElementId(), HttpStatus.CREATED);
     }
 
+    
     @DeleteMapping("/{elementId}")
     public ResponseEntity<String> deletePersonNode(@PathVariable String elementId) {
         Optional<Person> personNodeOptional = personRepository.findById(elementId);
