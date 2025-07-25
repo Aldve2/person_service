@@ -10,6 +10,7 @@ import yps.systems.ai.repository.IPersonRepository;
 import java.util.List;
 import java.util.Optional;
 
+@CrossOrigin(origins = "*", methods = {RequestMethod.POST, RequestMethod.GET})
 @RestController
 @RequestMapping("/personService")
 public class PersonController {
